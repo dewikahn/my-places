@@ -39,6 +39,8 @@
   .tagRow.off { opacity:0.35; }
   #stats { font-size:11px; color:#999; margin-top:8px; padding-top:8px; border-top:1px solid #eee; }
   #resetBtn { width:100%; margin-top:8px; padding:7px; border-radius:8px; border:1px solid #ddd; background:#fff; font-size:12px; cursor:pointer; }
+  #exportRow { display:flex; gap:6px; margin-top:6px; }
+  .exportBtn { flex:1; padding:7px 4px; border-radius:8px; border:1px solid #ddd; background:#fff; font-size:11px; cursor:pointer; text-align:center; }
 
   .pin-icon { position:relative; }
   .pin-circle { width:26px; height:26px; border-radius:50%; border:2.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.4); }
@@ -140,6 +142,10 @@
     <div class="sectionLabel">Categories</div>
     <div id="tagList"></div>
     <button id="resetBtn">Reset filters</button>
+    <div id="exportRow">
+      <button class="exportBtn" id="exportJsonBtn">⬇ Export JSON</button>
+      <button class="exportBtn" id="exportCsvBtn">⬇ Export CSV</button>
+    </div>
     <div id="stats"></div>
   </div>
 </div>
@@ -413,6 +419,32 @@ document.getElementById('resetBtn').onclick = () => {
   document.querySelector('.statusBtn[data-status="all"]').classList.add('active');
   rebuildTagPanel();
   rebuildMarkers();
+};
+
+function csvEscape(val) {
+  const s = String(val ?? '');
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+document.getElementById('exportJsonBtn').onclick = () => {
+  const data = { exportedAt: new Date().toISOString(), pins: PINS, nextId: nextId };
+  downloadFile('my-places-backup-' + new Date().toISOString().slice(0,10) + '.json', JSON.stringify(data, null, 2), 'application/json');
+};
+document.getElementById('exportCsvBtn').onclick = () => {
+  const header = ['Name','Address','Latitude','Longitude','Status','Categories'];
+  const rows = PINS.map(p => [
+    p.n, p.a || '', p.lat, p.lng, p.t ? 'To try' : 'Done', (p.c || []).map(t => t.n).join('; ')
+  ]);
+  const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+  downloadFile('my-places-export-' + new Date().toISOString().slice(0,10) + '.csv', csv, 'text/csv');
 };
 document.getElementById('panelHeader').onclick = () => {
   document.getElementById('panel').classList.toggle('collapsed');
