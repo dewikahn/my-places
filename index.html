@@ -102,6 +102,19 @@
   .newTagRow input[type=text] { flex:1; padding:7px 9px; border:1px solid #ddd; border-radius:8px; font-size:13px; }
   .newTagRow input[type=color] { width:36px; height:36px; border:none; padding:0; background:none; }
   .newTagRow button { padding:0 12px; border-radius:8px; border:1px solid #ddd; background:#f5f5f5; font-size:12px; }
+  #f_placesearch { width:100%; padding:9px 10px; border:1px solid #ddd; border-radius:8px; font-size:14px; }
+  #searchResults {
+    position:absolute; top:100%; left:0; right:0; z-index:10;
+    background:#fff; border:1px solid #ddd; border-radius:0 0 10px 10px;
+    max-height:220px; overflow-y:auto; display:none; box-shadow:0 6px 16px rgba(0,0,0,0.15);
+  }
+  #searchResults.show { display:block; }
+  .searchItem { padding:10px 12px; cursor:pointer; border-bottom:1px solid #f0f0f0; }
+  .searchItem:last-child { border-bottom:none; }
+  .searchItem:hover, .searchItem.hl { background:#f5f5f5; }
+  .searchItem .siName { font-size:13px; font-weight:600; color:#222; }
+  .searchItem .siAddr { font-size:11px; color:#888; margin-top:1px; }
+  .searchLoading { padding:10px 12px; font-size:12px; color:#999; }
   .saveBtn { width:100%; padding:12px; border-radius:10px; border:none; background:#222; color:#fff; font-size:15px; font-weight:600; cursor:pointer; margin-top:6px; }
   .cancelBtn { width:100%; padding:10px; border-radius:10px; border:none; background:none; color:#888; font-size:13px; cursor:pointer; }
 </style>
@@ -136,6 +149,15 @@
 <div class="modalOverlay" id="modalOverlay">
   <div class="modalSheet">
     <h2 id="modalTitle">Add a place</h2>
+    <div class="field" style="position:relative;">
+      <label>Search for a place</label>
+      <div id="googleSearchWrap" style="display:none;"></div>
+      <div id="fallbackSearchWrap">
+        <input type="text" id="f_placesearch" placeholder="Type a place name, like Google Maps..." autocomplete="off">
+        <div id="searchResults"></div>
+      </div>
+      <div id="searchModeNote" style="font-size:11px;color:#aaa;margin-top:4px;"></div>
+    </div>
     <div class="field">
       <label>Name</label>
       <input type="text" id="f_name" placeholder="Place name">
@@ -335,20 +357,35 @@ window.deletePin = function(pinId) {
   rebuildMarkers();
 };
 
+let knownTagNames = new Set();
+
 function rebuildTagPanel() {
   const colors = tagColorMap();
   const counts = tagCountMap();
   const names = Object.keys(colors).sort();
-  names.forEach(n => activeTags.add(n));
+  // only auto-activate tags we've never seen before (new categories you just created)
+  names.forEach(n => {
+    if (!knownTagNames.has(n)) {
+      knownTagNames.add(n);
+      activeTags.add(n);
+    }
+  });
   const el = document.getElementById('tagList');
   el.innerHTML = '';
   names.forEach(name => {
     const row = document.createElement('div');
-    row.className = 'tagRow';
+    row.className = 'tagRow' + (activeTags.has(name) ? '' : ' off');
     row.innerHTML = `<div class="tagDot" style="background:${colors[name]}"></div><span>${escapeHtml(name)}</span><span class="tagCount">${counts[name]}</span>`;
     row.onclick = () => {
-      if (activeTags.has(name)) { activeTags.delete(name); row.classList.add('off'); }
-      else { activeTags.add(name); row.classList.remove('off'); }
+      const isolatedToThis = activeTags.size === 1 && activeTags.has(name);
+      if (isolatedToThis) {
+        // already showing just this one -> restore all categories
+        activeTags = new Set(names);
+      } else {
+        // show ONLY this category
+        activeTags = new Set([name]);
+      }
+      rebuildTagPanel();
       rebuildMarkers();
     };
     el.appendChild(row);
@@ -372,9 +409,9 @@ document.getElementById('resetBtn').onclick = () => {
   statusFilter = 'all';
   document.getElementById('search').value = '';
   searchTerm = '';
-  document.querySelectorAll('.tagRow').forEach(r => r.classList.remove('off'));
   document.querySelectorAll('.statusBtn').forEach(b => b.classList.remove('active'));
   document.querySelector('.statusBtn[data-status="all"]').classList.add('active');
+  rebuildTagPanel();
   rebuildMarkers();
 };
 document.getElementById('panelHeader').onclick = () => {
@@ -401,7 +438,9 @@ function openAdd() {
   modalSelectedTags = new Set();
   modalNewTags = [];
   document.getElementById('modalTitle').textContent = 'Add a place';
-  fName.value = ''; fAddr.value = '';
+  fName.value = ''; fAddr.value = ''; searchInput.value = '';
+  searchResultsEl.classList.remove('show');
+  if (window._googlePlaceAutocompleteRef) { try { window._googlePlaceAutocompleteRef.value = ''; } catch(e){} }
   locStatus.textContent = '';
   setModalStatus(true);
   renderChips();
@@ -414,7 +453,8 @@ window.openEdit = function(pinId) {
   modalSelectedTags = new Set(pin.c.map(t=>t.n));
   modalNewTags = [];
   document.getElementById('modalTitle').textContent = 'Edit place';
-  fName.value = pin.n; fAddr.value = pin.a || '';
+  fName.value = pin.n; fAddr.value = pin.a || ''; searchInput.value = '';
+  searchResultsEl.classList.remove('show');
   locStatus.textContent = 'Current location kept (tap "Tap on map" to change)';
   setModalStatus(pin.t);
   renderChips();
@@ -433,6 +473,131 @@ function setModalStatus(isTry) {
 }
 document.getElementById('btnStatusTry').onclick = () => setModalStatus(true);
 document.getElementById('btnStatusDone').onclick = () => setModalStatus(false);
+
+// ---------- OPTIONAL: Google Places search (best quality, needs your own free API key) ----------
+// To enable: paste your Google Maps API key between the quotes below.
+// Leave it as-is to keep using the free Photon/OpenStreetMap search instead.
+const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_KEY_HERE";
+
+function initGoogleSearch() {
+  const wrap = document.getElementById('googleSearchWrap');
+  const fallbackWrap = document.getElementById('fallbackSearchWrap');
+  const note = document.getElementById('searchModeNote');
+
+  if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY === "PASTE_YOUR_KEY_HERE") {
+    note.textContent = 'Using free OpenStreetMap search. Add a Google API key in the code for Google-quality results.';
+    return; // keep Photon fallback visible
+  }
+
+  // Google's official bootstrap loader snippet
+  (g=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})({key: GOOGLE_MAPS_API_KEY, v: "weekly"});
+
+  google.maps.importLibrary('places').then(({ PlaceAutocompleteElement }) => {
+    wrap.style.display = 'block';
+    fallbackWrap.style.display = 'none';
+    note.textContent = 'Powered by Google Places';
+
+    const placeAutocomplete = new PlaceAutocompleteElement();
+    placeAutocomplete.id = 'googlePlaceInput';
+    wrap.appendChild(placeAutocomplete);
+    window._googlePlaceAutocompleteRef = placeAutocomplete;
+
+    placeAutocomplete.addEventListener('gmp-select', async ({ placePrediction }) => {
+      const place = placePrediction.toPlace();
+      await place.fetchFields({ fields: ['displayName', 'formattedAddress', 'location'] });
+      const loc = place.location;
+      fName.value = place.displayName || '';
+      fAddr.value = place.formattedAddress || '';
+      pendingLoc = { lat: loc.lat(), lng: loc.lng() };
+      locStatus.textContent = 'Location set from search ✓';
+      map.setView([loc.lat(), loc.lng()], 16);
+    });
+  }).catch(err => {
+    console.error('Google Places failed to load, falling back', err);
+    note.textContent = 'Google search unavailable — using free OpenStreetMap search instead.';
+    wrap.style.display = 'none';
+    fallbackWrap.style.display = 'block';
+  });
+}
+initGoogleSearch();
+
+// ---------- Place search (Photon / OpenStreetMap, free, no API key) ----------
+const searchInput = document.getElementById('f_placesearch');
+const searchResultsEl = document.getElementById('searchResults');
+let searchDebounce = null;
+let searchAbort = null;
+
+function addressFromProps(p) {
+  const parts = [];
+  if (p.housenumber && p.street) parts.push(p.housenumber + ' ' + p.street);
+  else if (p.street) parts.push(p.street);
+  if (p.city && p.city !== p.name) parts.push(p.city);
+  else if (p.district) parts.push(p.district);
+  if (p.state) parts.push(p.state);
+  if (p.country) parts.push(p.country);
+  return parts.join(', ');
+}
+
+function renderSearchResults(features) {
+  searchResultsEl.innerHTML = '';
+  if (!features || features.length === 0) {
+    searchResultsEl.classList.remove('show');
+    return;
+  }
+  features.forEach(f => {
+    const p = f.properties;
+    const name = p.name || p.street || p.city || 'Unnamed place';
+    const addr = addressFromProps(p);
+    const item = document.createElement('div');
+    item.className = 'searchItem';
+    item.innerHTML = `<div class="siName">${escapeHtml(name)}</div><div class="siAddr">${escapeHtml(addr)}</div>`;
+    item.onclick = () => {
+      fName.value = name;
+      fAddr.value = addr;
+      const coords = f.geometry.coordinates; // [lon, lat]
+      pendingLoc = { lat: coords[1], lng: coords[0] };
+      locStatus.textContent = 'Location set from search ✓';
+      searchResultsEl.classList.remove('show');
+      searchInput.value = name;
+      map.setView([coords[1], coords[0]], 16);
+    };
+    searchResultsEl.appendChild(item);
+  });
+  searchResultsEl.classList.add('show');
+}
+
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim();
+  clearTimeout(searchDebounce);
+  if (searchAbort) searchAbort.abort();
+  if (q.length < 3) {
+    searchResultsEl.classList.remove('show');
+    return;
+  }
+  searchResultsEl.innerHTML = '<div class="searchLoading">Searching...</div>';
+  searchResultsEl.classList.add('show');
+  searchDebounce = setTimeout(() => {
+    searchAbort = new AbortController();
+    // bias results toward current map view
+    const c = map.getCenter();
+    const url = 'https://photon.komoot.io/api/?q=' + encodeURIComponent(q)
+      + '&limit=6&lat=' + c.lat + '&lon=' + c.lng;
+    fetch(url, { signal: searchAbort.signal })
+      .then(r => r.json())
+      .then(data => renderSearchResults(data.features))
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          searchResultsEl.innerHTML = '<div class="searchLoading">Search unavailable — check connection</div>';
+        }
+      });
+  }, 350);
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#f_placesearch') && !e.target.closest('#searchResults')) {
+    searchResultsEl.classList.remove('show');
+  }
+});
 
 document.getElementById('btnUseGps').onclick = () => {
   if (!navigator.geolocation) { locStatus.textContent = 'Geolocation not available'; return; }
